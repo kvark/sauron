@@ -160,16 +160,36 @@ The Rust parts of Sauron should be the **data ingestion pipeline** and **inferen
 
 ## 5. Network Architecture
 
-### Starting Architecture: Temporal Fusion Transformer (TFT)
+### Design Philosophy: Foundation Model + Domain Layers
 
-Why TFT:
-- Designed specifically for **multi-horizon time-series forecasting**
-- Handles **mixed inputs**: static metadata (country, sector) + time-varying known (calendar, scheduled events) + time-varying unknown (prices, sentiment)
-- Built-in **interpretability**: variable importance, attention over time
-- Proven on similar macro-economic forecasting tasks
-- Available in `pytorch-forecasting` library
+Recent time-series foundation models (Chronos-2, MOIRAI-2) already solve the core
+forecasting problem — "given this history, what comes next?" — with strong zero-shot
+performance. **We don't need to reinvent that.** Our unique value is the domain-aware
+layers that these models lack entirely:
 
-### Architecture Overview
+1. **Event-driven regime detection** (geopolitical shocks → forecast adjustments)
+2. **Cross-sector causal propagation** (energy crisis → trade disruption → financial stress)
+3. **Scenario simulation** ("what if X sanctions Y?" counterfactual engine)
+4. **Policy-level interpretability** (why did the forecast change, in geopolitical terms)
+
+### Foundation Model Selection
+
+| Model | Params | Strengths | Role in Sauron |
+|-------|--------|-----------|---------------|
+| **Chronos-2** (Amazon) | 120M | Native covariate support via group attention, strong long-horizon, 300+ forecasts/sec on A10G, 600M+ HF downloads | **Primary backbone** — feeds sector time series as groups with covariates |
+| **MOIRAI-2** (Salesforce) | 11M | Decoder-only, 30x smaller than predecessor, #1 MASE on GIFT-Eval, fast inference | **Lightweight baseline** — fast iteration, ensemble candidate |
+| **TFT** (custom) | ~5-10M | Built-in variable selection, interpretability, handles mixed input types | **Domain-specific head** — sits on top of foundation embeddings |
+
+**Neither Chronos-2 nor MOIRAI-2 handles:**
+- Domain-specific causal structure (sanctions → trade disruption propagation)
+- Discrete geopolitical event encoding (regime shifts from GDELT)
+- Cross-sector interaction modeling (energy ↔ trade ↔ finance feedback loops)
+- Counterfactual scenario simulation ("what if China invades Taiwan?")
+- Policy-level explainability ("GDP forecast dropped because energy imports fell 40%")
+
+**That's our model's entire unique contribution.**
+
+### Architecture Overview: Hybrid Stack
 
 ```
                     ┌──────────────────────────────────────────┐
@@ -179,25 +199,45 @@ Why TFT:
                     └──────────────┬───────────────────────────┘
                                    │
                     ┌──────────────▼───────────────────────────┐
-                    │        Multi-Head Output Layer            │
-                    │   (one head per sector, shared backbone)  │
+                    │       LAYER 5: Interpretability           │
+                    │  Driver attribution per sector prediction │
+                    │  ("CHIPS ↓ because US export controls +   │
+                    │   TSMC capex delay + AI demand plateau")  │
                     └──────────────┬───────────────────────────┘
                                    │
                     ┌──────────────▼───────────────────────────┐
-                    │     Temporal Fusion Transformer Core      │
+                    │    LAYER 4: Scenario Simulation Engine    │
+                    │  Counterfactual injection: perturb event  │
+                    │  inputs and re-propagate through layers   │
+                    │  "What if EU sanctions on X? Re-run L2-3" │
+                    └──────────────┬───────────────────────────┘
+                                   │
+                    ┌──────────────▼───────────────────────────┐
+                    │  LAYER 3: Cross-Sector Interaction Graph  │
+                    │  Sector-to-sector attention + learned      │
+                    │  causal adjacency (energy→trade→finance)  │
+                    │  Models spillover effects and feedback     │
+                    └──────────────┬───────────────────────────┘
+                                   │
+                    ┌──────────────▼───────────────────────────┐
+                    │   LAYER 2: Event-Driven Regime Encoder    │
+                    │  GDELT events → event embeddings →        │
+                    │  regime shift detection → forecast         │
+                    │  adjustments (sanctions, wars, coups,      │
+                    │  trade agreements, elections)              │
+                    └──────────────┬───────────────────────────┘
+                                   │
+                    ┌──────────────▼───────────────────────────┐
+                    │   LAYER 1: Foundation Forecast Backbone    │
                     │                                           │
-                    │  ┌─────────────────────────────────────┐  │
-                    │  │  Multi-Head Self-Attention (time)   │  │
-                    │  └─────────────────────────────────────┘  │
-                    │  ┌─────────────────────────────────────┐  │
-                    │  │  Gated Residual Networks (per var)  │  │
-                    │  └─────────────────────────────────────┘  │
-                    │  ┌─────────────────────────────────────┐  │
-                    │  │  Variable Selection Networks        │  │
-                    │  └─────────────────────────────────────┘  │
-                    │  ┌─────────────────────────────────────┐  │
-                    │  │  LSTM Encoder / Decoder             │  │
-                    │  └─────────────────────────────────────┘  │
+                    │  ┌────────────────┐  ┌─────────────────┐ │
+                    │  │   Chronos-2    │  │    MOIRAI-2     │ │
+                    │  │   (primary)    │  │   (ensemble)    │ │
+                    │  │  Group attn    │  │   Lightweight   │ │
+                    │  │  w/ covariates │  │   baseline      │ │
+                    │  └───────┬────────┘  └───────┬─────────┘ │
+                    │          └────────┬───────────┘           │
+                    │          Ensemble / selection             │
                     └──────────────┬───────────────────────────┘
                                    │
           ┌────────────────────────┼────────────────────────┐
@@ -208,25 +248,62 @@ Why TFT:
  │ • Country codes  │   │ • Day of week/month  │   │ • FRED series    │
  │ • Sector metadata│   │ • Scheduled releases │   │ • ETF prices     │
  │ • Region groups  │   │ • Election dates     │   │ • GDELT sentiment│
- │                  │   │ • Policy change dates│   │ • Trade volumes  │
- └──────────────────┘   └──────────────────────┘   │ • Energy data    │
-                                                    │ • Patent counts  │
+ │ • Trade network  │   │ • Policy change dates│   │ • Trade volumes  │
+ │   topology       │   │ • Sanctions calendar │   │ • Energy data    │
+ └──────────────────┘   └──────────────────────┘   │ • Patent counts  │
+                                                    │ • Military spend │
                                                     └──────────────────┘
 ```
 
-### Why Not Just a Plain Transformer?
-- Time-series data has **different variable types** (static, known future, unknown) that need special handling
-- TFT's variable selection automatically learns which inputs matter for which sectors
-- Built-in quantile outputs give us confidence/uncertainty for free
-- We get interpretability without sacrificing performance
+### Layer Details
+
+**Layer 1 — Foundation Forecast Backbone:**
+Use Chronos-2's group attention to feed related time series (e.g., GDP + trade + energy
+for a country-sector pair) as a group. The model learns cross-series dynamics zero-shot.
+Fine-tune on our geo-economic data to adapt temporal patterns to this domain. MOIRAI-2
+serves as an independent lightweight forecast for ensembling.
+
+**Layer 2 — Event-Driven Regime Encoder:**
+GDELT events are encoded into dense vectors via a learned event embedding layer. A regime
+detection module identifies structural breaks (sanctions imposed, wars started, agreements
+signed) and generates regime-shift signals that modulate Layer 1's forecasts. This is where
+our model diverges fundamentally from general-purpose forecasters — it understands that
+"Russia invades Ukraine" is not just a data point but a regime change.
+
+**Layer 3 — Cross-Sector Interaction Graph:**
+A graph attention network where nodes are sectors and edges represent learned causal
+relationships. Energy → Trade, Military → Finance, Chips → Software, etc. The graph
+propagates shocks: an energy sector disruption flows through the graph to affect downstream
+sectors with learned lag structures. This is the "sector spillover" model.
+
+**Layer 4 — Scenario Simulation Engine:**
+Accepts hypothetical event injections: "What if EU imposes full sanctions on country X?"
+The event is encoded via Layer 2, propagated through the sector graph in Layer 3, and
+produces counterfactual forecasts. This is the "what if" engine — completely absent from
+all existing foundation models.
+
+**Layer 5 — Interpretability & Attribution:**
+Integrated gradients + attention weight analysis to produce human-readable driver
+explanations. For each sector prediction, output: "CHIPS tendency ↓0.3 because:
+US export controls (+0.15), TSMC capex delay (+0.10), AI demand plateau (+0.05)."
+
+### Why This Hybrid Beats Pure Approaches
+
+| Approach | Problem |
+|----------|---------|
+| Foundation models alone | No domain structure, no events, no scenarios, no interpretability |
+| TFT from scratch | Reinvents the forecasting engine; months of work that Chronos-2 does better |
+| Pure causal modeling | Too rigid; can't learn latent patterns from data |
+| **Our hybrid** | Foundation models handle temporal forecasting; our layers add domain intelligence |
 
 ### Evolution Path
 ```
-v0.1  Simple LSTM baseline (sanity check, 1 week)
-v0.2  TFT single-sector (prove the pipeline works, 2 weeks)
-v0.3  TFT multi-sector with shared backbone (core model, 4 weeks)
-v0.4  Add cross-sector attention (sectors influence each other, 2 weeks)
-v0.5  Add news/NLP branch with frozen sentence-transformer (2 weeks)
+v0.1  Chronos-2 zero-shot baseline (prove data pipeline works, 1 week)
+v0.2  Chronos-2 fine-tuned on our sector data (2 weeks)
+v0.3  Add MOIRAI-2 ensemble + event encoder (Layer 2, 3 weeks)
+v0.4  Add cross-sector interaction graph (Layer 3, 3 weeks)
+v0.5  Add scenario simulation engine (Layer 4, 2 weeks)
+v0.6  Add interpretability/attribution (Layer 5, 2 weeks)
 v1.0  Production model with Rust inference server
 ```
 
@@ -253,9 +330,13 @@ sauron/
 │   │   └── labels.py                # Label generation from ETF baskets
 │   ├── model/
 │   │   ├── __init__.py
-│   │   ├── tft.py                   # Temporal Fusion Transformer
-│   │   ├── baseline_lstm.py         # Simple LSTM baseline
+│   │   ├── backbone.py              # Chronos-2 / MOIRAI-2 foundation model wrappers
+│   │   ├── event_encoder.py         # Layer 2: GDELT event embeddings + regime detection
+│   │   ├── sector_graph.py          # Layer 3: Cross-sector interaction graph (GAT)
+│   │   ├── scenario_engine.py       # Layer 4: Counterfactual scenario simulation
+│   │   ├── attribution.py           # Layer 5: Driver attribution + interpretability
 │   │   ├── heads.py                 # Per-sector output heads
+│   │   ├── ensemble.py              # Foundation model ensemble logic
 │   │   └── losses.py                # Custom loss functions
 │   ├── training/
 │   │   ├── __init__.py
@@ -284,45 +365,52 @@ sauron/
 
 ## 7. Phased Roadmap
 
-### Phase 1: Data Foundation + Baseline (Weeks 1-4)
+### Phase 1: Data Foundation + Foundation Model Baseline (Weeks 1-4)
 
-**Goal**: Ingest data, generate labels, train a baseline that beats random.
+**Goal**: Ingest data, generate labels, establish strong baselines using pre-trained models.
 
 - [ ] Set up project structure, pyproject.toml, dependencies
 - [ ] Build FRED data source (macro indicators)
 - [ ] Build yfinance label generator (ETF basket returns -> tendency scores)
 - [ ] Build GDELT connector (news event counts & sentiment by sector)
 - [ ] Build data pipeline: merge sources, align timestamps, handle missing data
-- [ ] Train LSTM baseline on 3-5 sectors
-- [ ] Evaluate: does it beat a momentum-only baseline?
+- [ ] Run Chronos-2 zero-shot on sector time series (baseline 1)
+- [ ] Run MOIRAI-2 zero-shot as lightweight baseline (baseline 2)
+- [ ] Fine-tune Chronos-2 on our sector data with covariates
+- [ ] Evaluate: do foundation models beat momentum baseline? (expect yes)
 
-### Phase 2: Core Model (Weeks 5-8)
+### Phase 2: Domain Layers (Weeks 5-10)
 
-**Goal**: TFT model outperforms LSTM on multi-sector prediction.
+**Goal**: Build the layers that differentiate us from generic forecasters.
 
-- [ ] Implement TFT architecture (or adapt from pytorch-forecasting)
-- [ ] Multi-sector output heads with shared backbone
-- [ ] Add World Bank, EIA, SIPRI data sources
-- [ ] Hyperparameter tuning
-- [ ] Interpretability analysis: which variables drive which sectors?
+- [ ] **Layer 2 — Event Encoder**: GDELT event embeddings + regime shift detection
+- [ ] **Layer 3 — Sector Graph**: Cross-sector GAT with learned causal adjacency
+- [ ] Add World Bank, EIA, SIPRI data sources as additional covariates
+- [ ] Ensemble logic: Chronos-2 + MOIRAI-2 weighted combination
+- [ ] Wire layers together: foundation backbone → events → sector graph → output heads
+- [ ] Evaluate: does event-aware model outperform foundation-only baseline?
+- [ ] Interpretability analysis: which events and cross-sector links matter most?
 
-### Phase 3: NLP Integration (Weeks 9-12)
+### Phase 3: Scenario Engine + NLP (Weeks 11-14)
 
-**Goal**: News and text data improve predictions.
+**Goal**: Counterfactual simulation works. News text improves event detection.
 
-- [ ] GDELT full-text pipeline with sentence-transformer embeddings
-- [ ] Add arXiv abstract embeddings (for quantum, biotech, AI sectors)
-- [ ] SEC filing sentiment (for finance, chips, software sectors)
-- [ ] Cross-sector attention mechanism
+- [ ] **Layer 4 — Scenario Engine**: counterfactual event injection + propagation
+- [ ] **Layer 5 — Attribution**: integrated gradients + attention-based explanations
+- [ ] GDELT full-text pipeline with sentence-transformer embeddings for richer events
+- [ ] arXiv abstract embeddings (quantum, biotech, AI sector signals)
+- [ ] SEC filing sentiment (finance, chips, software sector signals)
+- [ ] Validate scenarios: do known historical shocks produce correct counterfactuals?
 
-### Phase 4: Production (Weeks 13-16)
+### Phase 4: Production (Weeks 15-18)
 
-**Goal**: Live prediction pipeline.
+**Goal**: Live prediction pipeline with scenario API.
 
-- [ ] ONNX export of trained model
+- [ ] ONNX export of domain layers (foundation models already have optimized inference)
 - [ ] Rust inference server (using `ort` crate for ONNX runtime)
 - [ ] Rust data ingestion pipeline (scheduled fetchers)
-- [ ] Dashboard / API for querying predictions
+- [ ] Scenario API: accept event hypotheticals, return counterfactual forecasts
+- [ ] Dashboard showing live tendency vectors + confidence bands + driver attribution
 - [ ] Monitoring and retraining pipeline
 
 ---
@@ -331,15 +419,17 @@ sauron/
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Training framework | PyTorch | Ecosystem, flexibility, community |
+| Training framework | PyTorch | Ecosystem, flexibility, HuggingFace integration |
 | Inference runtime | ONNX via Rust `ort` | Performance + Rust safety |
-| Architecture | TFT -> custom multi-sector TFT | Designed for this exact problem |
+| Forecasting backbone | Chronos-2 (primary) + MOIRAI-2 (ensemble) | Don't reinvent forecasting; leverage 120M pre-trained params |
+| Domain layers | Custom (event encoder, sector graph, scenario engine) | Our unique value — absent from all foundation models |
 | Labels | ETF basket z-scored returns | Automatable, immediate, large N |
 | Time resolution | Daily (align all sources to daily) | Balances granularity vs. data availability |
 | Lookback window | 90 days (tunable) | Enough context without memory issues |
 | Prediction horizons | 1mo, 3mo, 6mo | Short enough to validate, long enough to be useful |
 | Loss function | Pinball loss (quantile regression) | Gives uncertainty estimates natively |
 | Missing data | Forward-fill + masking | Common in multi-source time-series |
+| Scenario simulation | Counterfactual event injection | Key differentiator: "what if" analysis |
 
 ---
 
@@ -359,16 +449,24 @@ sauron/
 ## 10. Success Criteria
 
 ### Phase 1 Success
-- Model produces sector tendency predictions for at least 5 sectors
-- Beats momentum baseline (last month's return predicts next month) by >10% on directional accuracy
+- Chronos-2 zero-shot produces sector tendency predictions for at least 5 sectors
+- Fine-tuned Chronos-2 beats momentum baseline by >10% on directional accuracy
 - Data pipeline ingests from at least 3 sources reliably
 
 ### Phase 2 Success
 - All 12 sectors covered
-- TFT outperforms LSTM baseline by >15% on tendency direction
+- Event-aware model outperforms foundation-only baseline by >10% on tendency direction
+- Cross-sector graph captures known relationships (energy → trade validated)
 - Interpretability: can explain top-3 drivers per sector prediction
+
+### Phase 3 Success
+- Scenario engine produces plausible counterfactuals for known historical events
+  (e.g., 2022 Russia-Ukraine: inject event → model predicts energy/trade disruption)
+- NLP-enriched events improve regime detection accuracy
+- Attribution layer produces human-readable explanations
 
 ### Final Success
 - Directional accuracy >65% across sectors at 3-month horizon
 - Predictions update daily with <5 min latency
-- Dashboard shows live tendency vectors with confidence bands
+- Dashboard shows live tendency vectors with confidence bands + driver attribution
+- Scenario API responds to "what if" queries in <10 seconds
