@@ -173,6 +173,26 @@ class SauronDataset:
         except Exception as e:
             print(f"[Pipeline] GDELT skipped: {e}")
 
+        # World Bank development indicators
+        try:
+            from sauron.data.sources.worldbank import fetch_indicators, to_daily_features
+            wb_data = fetch_indicators(start_year=int(start[:4]))
+            frames.append(to_daily_features(wb_data))
+            print("[Pipeline] World Bank data loaded")
+        except Exception as e:
+            print(f"[Pipeline] World Bank skipped: {e}")
+
+        # SIPRI military expenditure
+        try:
+            from sauron.data.sources.sipri import fetch_milex, to_daily_features as sipri_daily
+            milex = fetch_milex()
+            sipri_df = sipri_daily(milex)
+            if not sipri_df.empty:
+                frames.append(sipri_df)
+                print("[Pipeline] SIPRI data loaded")
+        except Exception as e:
+            print(f"[Pipeline] SIPRI skipped: {e}")
+
         if not frames:
             raise RuntimeError("No data sources available. Check API keys and network.")
 

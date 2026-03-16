@@ -13,9 +13,16 @@ GDELT fields we care about:
 - ActionGeo_Lat/Long: where it happened
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
+
+
+def _to_str(d) -> str:
+    """Convert date/datetime to string if needed."""
+    if isinstance(d, (date, datetime)):
+        return d.strftime("%Y-%m-%d")
+    return str(d)
 
 # CAMEO root codes mapped to our sector relevance
 CAMEO_SECTOR_MAP = {
@@ -66,7 +73,8 @@ def fetch_gdelt_bigquery(
     except ImportError:
         raise ImportError("pip install google-cloud-bigquery")
 
-    end_date = end_date or datetime.now().strftime("%Y-%m-%d")
+    start_date = _to_str(start_date)
+    end_date = _to_str(end_date) if end_date else datetime.now().strftime("%Y-%m-%d")
     start_int = start_date.replace("-", "")
     end_int = end_date.replace("-", "")
 
@@ -111,7 +119,8 @@ def fetch_gdelt_csv(
 
     import requests
 
-    end_date = end_date or datetime.now().strftime("%Y-%m-%d")
+    start_date = _to_str(start_date)
+    end_date = _to_str(end_date) if end_date else datetime.now().strftime("%Y-%m-%d")
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
 
