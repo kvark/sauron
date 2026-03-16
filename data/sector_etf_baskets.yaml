@@ -1,0 +1,50 @@
+# ETF baskets per sector for label generation.
+# Returns are computed as weighted averages across these tickers.
+
+NATRES:
+  etfs: [XLE, XOP, GDX, SLV, DBA]
+  weights: [0.3, 0.2, 0.2, 0.15, 0.15]
+
+GREEN:
+  etfs: [ICLN, TAN, QCLN, FAN, LIT]
+  weights: [0.3, 0.2, 0.2, 0.15, 0.15]
+
+CHIPS:
+  etfs: [SOXX, SMH, PSI]
+  weights: [0.4, 0.4, 0.2]
+
+SOFTWARE:
+  etfs: [IGV, WCLD, SKYY, CLOU]
+  weights: [0.35, 0.25, 0.2, 0.2]
+
+QUANTUM:
+  etfs: [QTUM]
+  weights: [1.0]
+
+WEAPONS:
+  etfs: [ITA, PPA, XAR, DFEN]
+  weights: [0.3, 0.25, 0.25, 0.2]
+
+EDUCATION:
+  etfs: [EDUT]
+  weights: [1.0]
+
+BIOTECH:
+  etfs: [XBI, IBB, BBH, ARKG]
+  weights: [0.3, 0.3, 0.2, 0.2]
+
+FINANCE:
+  etfs: [XLF, KBE, ARKF, BITQ]
+  weights: [0.35, 0.25, 0.2, 0.2]
+
+INFRA:
+  etfs: [PAVE, IFRA, IGF]
+  weights: [0.4, 0.3, 0.3]
+
+AGRI:
+  etfs: [MOO, DBA, VEGI]
+  weights: [0.4, 0.3, 0.3]
+
+SPACE:
+  etfs: [UFO, ARKX, ROKT]
+  weights: [0.35, 0.35, 0.3]

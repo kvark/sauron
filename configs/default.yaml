@@ -1,0 +1,54 @@
+# Sauron default training configuration
+
+data:
+  lookback_days: 90
+  horizons: [30, 90, 180]  # 1mo, 3mo, 6mo in days
+  min_history_days: 365
+  frequency: daily
+  missing_strategy: forward_fill_and_mask
+
+model:
+  backbone: chronos-2       # chronos-2 | moirai-2 | ensemble
+  ensemble_weights:
+    chronos2: 0.7
+    moirai2: 0.3
+  event_encoder:
+    embedding_dim: 128
+    num_event_types: 300     # GDELT CAMEO codes
+    regime_threshold: 0.8
+  sector_graph:
+    hidden_dim: 128
+    num_heads: 4
+    num_layers: 2
+    dropout: 0.1
+  output_heads:
+    quantiles: [0.1, 0.25, 0.5, 0.75, 0.9]
+
+training:
+  batch_size: 64
+  learning_rate: 1.0e-4
+  weight_decay: 1.0e-5
+  max_epochs: 100
+  patience: 10
+  grad_clip: 1.0
+  val_split: 0.15
+  test_split: 0.15
+
+fred:
+  # Key set via FRED_API_KEY env var
+  series:
+    - GDP
+    - CPIAUCSL        # CPI
+    - FEDFUNDS        # Fed funds rate
+    - UNRATE          # Unemployment
+    - DGS10           # 10Y treasury
+    - DTWEXBGS        # Trade-weighted USD
+    - M2SL            # M2 money supply
+    - INDPRO          # Industrial production
+    - HOUST           # Housing starts
+    - DCOILWTICO      # WTI crude oil
+
+gdelt:
+  lookback_years: 5
+  min_goldstein_abs: 3.0  # filter low-impact events
+  aggregation: daily

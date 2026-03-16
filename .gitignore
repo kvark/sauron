@@ -1,0 +1,31 @@
+# Data
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.h5
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+.venv/
+
+# Secrets
+.env
+*.key
+
+# IDE
+.vscode/
+.idea/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Models
+*.onnx
+*.pt
+*.bin
+*.safetensors
+checkpoints/

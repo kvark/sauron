@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "sauron"
+version = "0.1.0"
+description = "Geo-Economic World Model: The Eye That Sees All Tendencies"
+readme = "PLAN.md"
+requires-python = ">=3.11"
+dependencies = [
+    # Core ML
+    "torch>=2.2",
+    "transformers>=4.40",
+    "chronos-forecasting>=2.0",
+    "uni2ts",               # MOIRAI-2
+
+    # Data sources
+    "fredapi>=0.5",
+    "yfinance>=0.2",
+    "pandas>=2.2",
+    "pyarrow>=15.0",
+    "requests>=2.31",
+    "google-cloud-bigquery>=3.0",  # GDELT via BigQuery
+    "wbgapi>=1.0",                 # World Bank
+
+    # Graph neural networks
+    "torch-geometric>=2.5",
+
+    # Utilities
+    "pyyaml>=6.0",
+    "tqdm>=4.66",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "ipykernel>=6.0",
+    "matplotlib>=3.8",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
