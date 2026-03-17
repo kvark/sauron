@@ -160,7 +160,7 @@ class SauronDataset:
         except Exception as e:
             print(f"[Pipeline] EIA skipped: {e}")
 
-        # GDELT event features
+        # GDELT event features (try CSV download, fallback to HuggingFace)
         try:
             from sauron.data.sources.gdelt import (
                 aggregate_daily_sector_features,
@@ -169,18 +169,36 @@ class SauronDataset:
             raw_gdelt = fetch_gdelt_csv(start_date=start)
             if not raw_gdelt.empty:
                 frames.append(aggregate_daily_sector_features(raw_gdelt))
-                print("[Pipeline] GDELT data loaded")
+                print("[Pipeline] GDELT data loaded (CSV)")
+            else:
+                raise RuntimeError("No events from CSV download")
         except Exception as e:
-            print(f"[Pipeline] GDELT skipped: {e}")
+            print(f"[Pipeline] GDELT CSV failed: {e}, trying HuggingFace...")
+            try:
+                from sauron.data.sources.gdelt import aggregate_daily_sector_features
+                from sauron.data.sources.huggingface import fetch_gdelt_hf
+                raw_gdelt = fetch_gdelt_hf()
+                if not raw_gdelt.empty:
+                    frames.append(aggregate_daily_sector_features(raw_gdelt))
+                    print("[Pipeline] GDELT data loaded (HuggingFace)")
+            except Exception as e2:
+                print(f"[Pipeline] GDELT skipped: {e2}")
 
-        # World Bank development indicators
+        # World Bank development indicators (try wbgapi, fallback to HuggingFace)
         try:
             from sauron.data.sources.worldbank import fetch_indicators, to_daily_features
             wb_data = fetch_indicators(start_year=int(start[:4]))
             frames.append(to_daily_features(wb_data))
-            print("[Pipeline] World Bank data loaded")
+            print("[Pipeline] World Bank data loaded (wbgapi)")
         except Exception as e:
-            print(f"[Pipeline] World Bank skipped: {e}")
+            print(f"[Pipeline] World Bank wbgapi failed: {e}, trying HuggingFace...")
+            try:
+                from sauron.data.sources.huggingface import fetch_wdi_hf, wdi_to_daily_features
+                wb_data = fetch_wdi_hf(start_year=int(start[:4]))
+                frames.append(wdi_to_daily_features(wb_data))
+                print("[Pipeline] World Bank data loaded (HuggingFace)")
+            except Exception as e2:
+                print(f"[Pipeline] World Bank skipped: {e2}")
 
         # SIPRI military expenditure
         try:

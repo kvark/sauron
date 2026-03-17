@@ -1,10 +1,14 @@
 """CLI entrypoint for data fetching.
 
 Usage:
-    python -m sauron.data.fetch                  # fetch all sources
-    python -m sauron.data.fetch --sources fred eia  # specific sources only
-    python -m sauron.data.fetch --start 2020-01-01  # custom start date
-    python -m sauron.data.fetch --synthetic         # generate synthetic data (offline testing)
+    python -m sauron.data.fetch                         # fetch all API sources
+    python -m sauron.data.fetch --sources fred eia       # specific sources only
+    python -m sauron.data.fetch --sources hf_worldbank   # HuggingFace World Bank (no API key)
+    python -m sauron.data.fetch --sources hf_gdelt       # HuggingFace GDELT events
+    python -m sauron.data.fetch --sources hf_etf         # HuggingFace ETF prices
+    python -m sauron.data.fetch --sources hf_crude_oil   # HuggingFace crude oil prices
+    python -m sauron.data.fetch --start 2020-01-01       # custom start date
+    python -m sauron.data.fetch --synthetic              # generate synthetic data (offline testing)
 """
 
 import argparse
@@ -21,6 +25,9 @@ OUTPUT_DIR = Path("data/raw")
 PROCESSED_DIR = Path("data/processed")
 
 ALL_SOURCES = ["fred", "eia", "gdelt", "worldbank", "sipri", "yfinance"]
+
+# HuggingFace-backed alternatives (no API keys required)
+HF_SOURCES = ["hf_worldbank", "hf_gdelt", "hf_etf", "hf_crude_oil"]
 
 
 def fetch_source(name: str, start: str) -> pd.DataFrame | None:
@@ -57,6 +64,29 @@ def fetch_source(name: str, start: str) -> pd.DataFrame | None:
             from sauron.data.sources.yfinance_labels import compute_tendency_labels, load_baskets
             baskets = load_baskets()
             return compute_tendency_labels(baskets, start=start)
+
+        # HuggingFace-backed sources (no API keys needed)
+        elif name == "hf_worldbank":
+            from sauron.data.sources.huggingface import fetch_wdi_hf, wdi_to_daily_features
+            wb = fetch_wdi_hf(start_year=int(start[:4]))
+            return wdi_to_daily_features(wb)
+
+        elif name == "hf_gdelt":
+            from sauron.data.sources.gdelt import aggregate_daily_sector_features
+            from sauron.data.sources.huggingface import fetch_gdelt_hf
+            raw = fetch_gdelt_hf()
+            if raw.empty:
+                print(f"[{name}] No events returned")
+                return None
+            return aggregate_daily_sector_features(raw)
+
+        elif name == "hf_etf":
+            from sauron.data.sources.huggingface import fetch_etf_prices_hf
+            return fetch_etf_prices_hf()
+
+        elif name == "hf_crude_oil":
+            from sauron.data.sources.huggingface import fetch_crude_oil_hf
+            return fetch_crude_oil_hf()
 
         else:
             print(f"[{name}] Unknown source")
@@ -144,9 +174,10 @@ def save_dataframe(df: pd.DataFrame, name: str, output_dir: Path) -> Path:
 
 def main():
     parser = argparse.ArgumentParser(description="Sauron data fetcher")
+    all_choices = ALL_SOURCES + HF_SOURCES
     parser.add_argument(
         "--sources", nargs="+", default=ALL_SOURCES,
-        help=f"Sources to fetch (default: all). Choices: {ALL_SOURCES}",
+        help=f"Sources to fetch (default: all). Choices: {all_choices}",
     )
     parser.add_argument("--start", default="2020-01-01", help="Start date (YYYY-MM-DD)")
     parser.add_argument("--synthetic", action="store_true", help="Generate synthetic data instead")
