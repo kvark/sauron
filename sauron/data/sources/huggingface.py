@@ -27,6 +27,14 @@ def _load_hf_dataset(repo_id: str, split: str = "train", **kwargs) -> pd.DataFra
     return ds.to_pandas()
 
 
+def _load_hf_parquet(repo_id: str, filename: str) -> pd.DataFrame:
+    """Download and load a single parquet file from a HuggingFace dataset repo."""
+    from huggingface_hub import hf_hub_download
+
+    path = hf_hub_download(repo_id, filename, repo_type="dataset")
+    return pd.read_parquet(path)
+
+
 # ---------------------------------------------------------------------------
 # World Development Indicators (replaces worldbank.py)
 # ---------------------------------------------------------------------------
@@ -69,127 +77,39 @@ def fetch_wdi_hf(
     countries = countries or DEFAULT_COUNTRIES
 
     print("[HF-WDI] Loading datonic/world_development_indicators...")
-    raw = _load_hf_dataset("datonic/world_development_indicators")
+    raw = _load_hf_parquet(
+        "datonic/world_development_indicators",
+        "data/world_development_indicators.parquet",
+    )
 
-    # The WDI dataset has columns: Country Name, Country Code, Indicator Name,
-    # Indicator Code, and year columns (e.g., "2010", "2011", ...)
-    # Identify the format and adapt
+    # Dataset is long format: country_code, indicator_code, year, indicator_value
     indicator_codes = set(indicators.keys())
+    filtered = raw[
+        (raw["indicator_code"].isin(indicator_codes))
+        & (raw["country_code"].isin(countries))
+    ].copy()
 
-    # Filter to our indicators and countries
-    if "Indicator Code" in raw.columns:
-        # Standard WDI format: wide with year columns
-        filtered = raw[
-            (raw["Indicator Code"].isin(indicator_codes))
-            & (raw["Country Code"].isin(countries))
-        ].copy()
+    filtered["year"] = pd.to_numeric(filtered["year"], errors="coerce")
+    filtered = filtered[
+        (filtered["year"] >= start_year) & (filtered["year"] <= end_year)
+    ].dropna(subset=["year"])
+    filtered["year"] = filtered["year"].astype(int)
 
-        year_cols = [
-            c for c in filtered.columns
-            if c.isdigit() and start_year <= int(c) <= end_year
-        ]
+    filtered["friendly_name"] = filtered["indicator_code"].map(indicators)
+    filtered["indicator_value"] = pd.to_numeric(filtered["indicator_value"], errors="coerce")
 
-        frames = []
-        for _, row in filtered.iterrows():
-            ind_code = row["Indicator Code"]
-            friendly = indicators.get(ind_code)
-            if not friendly:
-                continue
-            country = row["Country Code"]
-            for yr in year_cols:
-                val = row[yr]
-                if pd.notna(val):
-                    frames.append({
-                        "country": country,
-                        "year": int(yr),
-                        friendly: float(val),
-                    })
+    result = filtered.pivot_table(
+        index=["country_code", "year"],
+        columns="friendly_name",
+        values="indicator_value",
+        aggfunc="first",
+    ).reset_index()
+    result = result.rename(columns={"country_code": "country"})
+    result.columns.name = None
 
-        if not frames:
-            raise RuntimeError("No WDI data matched filters")
+    if result.empty:
+        raise RuntimeError("No WDI data matched filters")
 
-        result = pd.DataFrame(frames)
-        # Merge rows with same (country, year) into single rows
-        result = result.groupby(["country", "year"]).first().reset_index()
-
-    elif "indicator_code" in raw.columns:
-        # Alternative format with lowercase column names
-        filtered = raw[
-            (raw["indicator_code"].isin(indicator_codes))
-            & (raw["country_code"].isin(countries))
-        ].copy()
-
-        year_cols = [
-            c for c in filtered.columns
-            if c.replace(".", "").isdigit()
-            and start_year <= int(float(c)) <= end_year
-        ]
-
-        frames = []
-        for _, row in filtered.iterrows():
-            ind_code = row["indicator_code"]
-            friendly = indicators.get(ind_code)
-            if not friendly:
-                continue
-            country = row["country_code"]
-            for yr in year_cols:
-                val = row[yr]
-                if pd.notna(val):
-                    frames.append({
-                        "country": country,
-                        "year": int(float(yr)),
-                        friendly: float(val),
-                    })
-
-        if not frames:
-            raise RuntimeError("No WDI data matched filters")
-
-        result = pd.DataFrame(frames)
-        result = result.groupby(["country", "year"]).first().reset_index()
-
-    else:
-        # Long format: columns like country_code, indicator_code, year, value
-        value_col = "value" if "value" in raw.columns else raw.columns[-1]
-        country_col = next(
-            (c for c in raw.columns if "country" in c.lower() and "code" in c.lower()),
-            None,
-        )
-        indicator_col = next(
-            (c for c in raw.columns if "indicator" in c.lower() and "code" in c.lower()),
-            None,
-        )
-        year_col = next(
-            (c for c in raw.columns if "year" in c.lower() or "date" in c.lower()),
-            None,
-        )
-
-        if not all([country_col, indicator_col, year_col]):
-            raise RuntimeError(
-                f"Cannot parse WDI format. Columns: {list(raw.columns)}"
-            )
-
-        filtered = raw[
-            (raw[indicator_col].isin(indicator_codes))
-            & (raw[country_col].isin(countries))
-        ].copy()
-
-        filtered["year"] = pd.to_numeric(filtered[year_col], errors="coerce").astype(int)
-        filtered = filtered[
-            (filtered["year"] >= start_year) & (filtered["year"] <= end_year)
-        ]
-
-        filtered["friendly_name"] = filtered[indicator_col].map(indicators)
-        filtered[value_col] = pd.to_numeric(filtered[value_col], errors="coerce")
-
-        result = filtered.pivot_table(
-            index=[country_col, "year"],
-            columns="friendly_name",
-            values=value_col,
-            aggfunc="first",
-        ).reset_index()
-        result = result.rename(columns={country_col: "country"})
-
-    result["year"] = result["year"].astype(int)
     print(f"[HF-WDI] Loaded {len(result)} rows for {result['country'].nunique()} countries")
     return result.sort_values(["country", "year"]).reset_index(drop=True)
 
@@ -218,42 +138,31 @@ def fetch_gdelt_hf(
     """Fetch GDELT event data from HuggingFace.
 
     Dataset: dwb2023/gdelt-event-2025-v4
-    Returns raw events in same format as gdelt.fetch_gdelt_csv().
+    Downloads individual parquet files (one per day).
 
-    Note: This dataset covers a limited date range (snapshots from 2025).
+    Note: This dataset covers a limited date range (May 1-11, 2025).
     For historical data, use fetch_gdelt_csv() or fetch_gdelt_bigquery().
     """
+    from huggingface_hub import list_repo_files
+
     print("[HF-GDELT] Loading dwb2023/gdelt-event-2025-v4...")
-    raw = _load_hf_dataset("dwb2023/gdelt-event-2025-v4")
+    files = [
+        f for f in list_repo_files("dwb2023/gdelt-event-2025-v4", repo_type="dataset")
+        if f.endswith(".parquet")
+    ]
 
-    # Map HF column names to our expected names
-    col_map = {}
-    for expected in ["SQLDATE", "EventCode", "EventRootCode", "GoldsteinScale",
-                     "NumMentions", "AvgTone", "Actor1CountryCode",
-                     "Actor2CountryCode", "ActionGeo_CountryCode",
-                     "ActionGeo_Lat", "ActionGeo_Long", "NumSources"]:
-        # Try exact match first, then case-insensitive
-        if expected in raw.columns:
-            col_map[expected] = expected
-        else:
-            lower_map = {c.lower(): c for c in raw.columns}
-            if expected.lower() in lower_map:
-                col_map[expected] = lower_map[expected.lower()]
+    frames = []
+    for f in files:
+        frames.append(_load_hf_parquet("dwb2023/gdelt-event-2025-v4", f))
+    df = pd.concat(frames, ignore_index=True)
 
-    # Rename to standard names
-    reverse_map = {v: k for k, v in col_map.items()}
-    df = raw.rename(columns=reverse_map)
+    # This dataset uses 'Day' instead of 'SQLDATE'
+    df["date"] = pd.to_datetime(df["Day"].astype(str), format="%Y%m%d", errors="coerce")
 
     # Ensure numeric types
     for col in ["GoldsteinScale", "NumMentions", "AvgTone", "NumSources"]:
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors="coerce")
-
-    # Parse date
-    if "SQLDATE" in df.columns:
-        df["date"] = pd.to_datetime(df["SQLDATE"].astype(str), format="%Y%m%d", errors="coerce")
-    elif "Day" in df.columns:
-        df["date"] = pd.to_datetime(df["Day"].astype(str), format="%Y%m%d", errors="coerce")
 
     # Ensure EventCode and EventRootCode are strings
     for col in ["EventCode", "EventRootCode"]:
@@ -261,10 +170,9 @@ def fetch_gdelt_hf(
             df[col] = df[col].astype(str)
 
     # Filter by impact threshold
-    if "GoldsteinScale" in df.columns:
-        df = df[df["GoldsteinScale"].abs() >= min_goldstein_abs]
+    df = df[df["GoldsteinScale"].abs() >= min_goldstein_abs]
 
-    print(f"[HF-GDELT] Loaded {len(df)} events")
+    print(f"[HF-GDELT] Loaded {len(df)} events across {df['date'].nunique()} days")
     return df
 
 

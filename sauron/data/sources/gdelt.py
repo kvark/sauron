@@ -109,11 +109,15 @@ def fetch_gdelt_csv(
     start_date: str = "2020-01-01",
     end_date: str | None = None,
     min_goldstein_abs: float = 3.0,
+    max_days: int | None = None,
 ) -> pd.DataFrame:
     """Fetch GDELT events via CSV download (no GCP account needed).
 
     Downloads daily event files from GDELT's public URL.
     Slower than BigQuery but requires no setup.
+
+    Args:
+        max_days: If set, only fetch the most recent N days instead of the full range.
     """
     import io
 
@@ -123,6 +127,9 @@ def fetch_gdelt_csv(
     end_date = _to_str(end_date) if end_date else datetime.now().strftime("%Y-%m-%d")
     start = datetime.strptime(start_date, "%Y-%m-%d")
     end = datetime.strptime(end_date, "%Y-%m-%d")
+
+    if max_days is not None:
+        start = max(start, end - timedelta(days=max_days))
 
     cols = [
         "GlobalEventID", "Day", "MonthYear", "Year", "FractionDate",

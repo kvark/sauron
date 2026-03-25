@@ -26,6 +26,7 @@ class SauronDatasetTorch(Dataset):
         s = self.samples[idx]
         features = torch.tensor(s["features"], dtype=torch.float32)
         mask = torch.tensor(s["mask"], dtype=torch.float32)
+        features = torch.nan_to_num(features, nan=0.0)
 
         # Build label tensor: one value per sector
         labels = torch.full((len(self.sector_names),), float("nan"))

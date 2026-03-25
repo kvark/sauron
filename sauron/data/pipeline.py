@@ -140,65 +140,80 @@ class SauronDataset:
     def __init__(self, config_path: str = "configs/default.yaml"):
         self.config = load_config(config_path)
 
-    def fetch_all_features(self, start: str = "2015-01-01") -> pd.DataFrame:
-        """Fetch and merge all data sources into a single feature DataFrame."""
+    def fetch_all_features(
+        self, start: str = "2015-01-01", hf_only: bool = False,
+    ) -> pd.DataFrame:
+        """Fetch and merge all data sources into a single feature DataFrame.
+
+        Args:
+            start: Start date for data fetching.
+            hf_only: If True, skip API sources and only use HuggingFace datasets.
+        """
         frames = []
 
-        # FRED macro data
-        try:
-            from sauron.data.sources.fred import fetch_default as fetch_fred
-            frames.append(fetch_fred(start=start))
-            print("[Pipeline] FRED data loaded")
-        except Exception as e:
-            print(f"[Pipeline] FRED skipped: {e}")
+        if not hf_only:
+            # FRED macro data
+            try:
+                from sauron.data.sources.fred import fetch_default as fetch_fred
+                frames.append(fetch_fred(start=start))
+                print("[Pipeline] FRED data loaded")
+            except Exception as e:
+                print(f"[Pipeline] FRED skipped: {e}")
 
-        # EIA energy data
-        try:
-            from sauron.data.sources.eia import fetch_default as fetch_eia
-            frames.append(fetch_eia(start=start))
-            print("[Pipeline] EIA data loaded")
-        except Exception as e:
-            print(f"[Pipeline] EIA skipped: {e}")
+            # EIA energy data
+            try:
+                from sauron.data.sources.eia import fetch_default as fetch_eia
+                frames.append(fetch_eia(start=start))
+                print("[Pipeline] EIA data loaded")
+            except Exception as e:
+                print(f"[Pipeline] EIA skipped: {e}")
 
-        # GDELT event features (try CSV download, fallback to HuggingFace)
+        # GDELT event features — prefer HuggingFace (fast), fall back to CSV
+        gdelt_loaded = False
         try:
-            from sauron.data.sources.gdelt import (
-                aggregate_daily_sector_features,
-                fetch_gdelt_csv,
-            )
-            raw_gdelt = fetch_gdelt_csv(start_date=start)
+            from sauron.data.sources.gdelt import aggregate_daily_sector_features
+            from sauron.data.sources.huggingface import fetch_gdelt_hf
+            raw_gdelt = fetch_gdelt_hf()
             if not raw_gdelt.empty:
                 frames.append(aggregate_daily_sector_features(raw_gdelt))
-                print("[Pipeline] GDELT data loaded (CSV)")
-            else:
-                raise RuntimeError("No events from CSV download")
+                print("[Pipeline] GDELT data loaded (HuggingFace)")
+                gdelt_loaded = True
         except Exception as e:
-            print(f"[Pipeline] GDELT CSV failed: {e}, trying HuggingFace...")
+            print(f"[Pipeline] GDELT HuggingFace failed: {e}")
+
+        if not gdelt_loaded and not hf_only:
             try:
-                from sauron.data.sources.gdelt import aggregate_daily_sector_features
-                from sauron.data.sources.huggingface import fetch_gdelt_hf
-                raw_gdelt = fetch_gdelt_hf()
+                from sauron.data.sources.gdelt import (
+                    aggregate_daily_sector_features,
+                    fetch_gdelt_csv,
+                )
+                # Limit CSV download to 90 days to avoid massive downloads
+                raw_gdelt = fetch_gdelt_csv(start_date=start, max_days=90)
                 if not raw_gdelt.empty:
                     frames.append(aggregate_daily_sector_features(raw_gdelt))
-                    print("[Pipeline] GDELT data loaded (HuggingFace)")
+                    print("[Pipeline] GDELT data loaded (CSV, last 90 days)")
             except Exception as e2:
-                print(f"[Pipeline] GDELT skipped: {e2}")
+                print(f"[Pipeline] GDELT CSV skipped: {e2}")
 
-        # World Bank development indicators (try wbgapi, fallback to HuggingFace)
+        # World Bank development indicators — prefer HuggingFace, fall back to wbgapi
+        wb_loaded = False
         try:
-            from sauron.data.sources.worldbank import fetch_indicators, to_daily_features
-            wb_data = fetch_indicators(start_year=int(start[:4]))
-            frames.append(to_daily_features(wb_data))
-            print("[Pipeline] World Bank data loaded (wbgapi)")
+            from sauron.data.sources.huggingface import fetch_wdi_hf, wdi_to_daily_features
+            wb_data = fetch_wdi_hf(start_year=int(start[:4]))
+            frames.append(wdi_to_daily_features(wb_data))
+            print("[Pipeline] World Bank data loaded (HuggingFace)")
+            wb_loaded = True
         except Exception as e:
-            print(f"[Pipeline] World Bank wbgapi failed: {e}, trying HuggingFace...")
+            print(f"[Pipeline] World Bank HuggingFace failed: {e}")
+
+        if not wb_loaded and not hf_only:
             try:
-                from sauron.data.sources.huggingface import fetch_wdi_hf, wdi_to_daily_features
-                wb_data = fetch_wdi_hf(start_year=int(start[:4]))
-                frames.append(wdi_to_daily_features(wb_data))
-                print("[Pipeline] World Bank data loaded (HuggingFace)")
-            except Exception as e2:
-                print(f"[Pipeline] World Bank skipped: {e2}")
+                from sauron.data.sources.worldbank import fetch_indicators, to_daily_features
+                wb_data = fetch_indicators(start_year=int(start[:4]))
+                frames.append(to_daily_features(wb_data))
+                print("[Pipeline] World Bank data loaded (wbgapi)")
+            except Exception as e:
+                print(f"[Pipeline] World Bank wbgapi skipped: {e}")
 
         # SIPRI military expenditure
         try:
@@ -224,10 +239,12 @@ class SauronDataset:
         horizons = self.config["data"]["horizons"]
         return compute_tendency_labels(baskets, horizons_days=horizons, start=start)
 
-    def build(self, start: str = "2015-01-01", horizon_days: int = 90) -> list[dict]:
+    def build(
+        self, start: str = "2015-01-01", horizon_days: int = 90, hf_only: bool = False,
+    ) -> list[dict]:
         """Full pipeline: fetch everything and build training samples."""
         print("[Pipeline] Fetching features...")
-        features = self.fetch_all_features(start=start)
+        features = self.fetch_all_features(start=start, hf_only=hf_only)
 
         print("[Pipeline] Fetching labels...")
         labels = self.fetch_labels(start=start)

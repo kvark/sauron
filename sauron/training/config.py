@@ -45,10 +45,16 @@ class TrainingConfig:
             raw = yaml.safe_load(f)
 
         flat = {}
-        for section in raw.values():
-            if isinstance(section, dict):
-                flat.update(section)
+        cls._flatten(raw, flat)
 
         known_fields = {f.name for f in cls.__dataclass_fields__.values()}
         filtered = {k: v for k, v in flat.items() if k in known_fields}
         return cls(**filtered)
+
+    @staticmethod
+    def _flatten(d: dict, out: dict) -> None:
+        for k, v in d.items():
+            if isinstance(v, dict):
+                TrainingConfig._flatten(v, out)
+            else:
+                out[k] = v
