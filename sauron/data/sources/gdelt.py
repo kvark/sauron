@@ -147,6 +147,147 @@ def fetch_gdelt_bigquery(
     return df
 
 
+# GKG theme-to-sector mapping for news sentiment
+GKG_SECTOR_THEMES = {
+    "NATRES": [
+        "ENV_OIL", "ENV_MINING", "ENV_GAS", "NATURAL_DISASTER",
+        "UNGP_FORESTS_RIVERS_OCEANS", "TAX_ECON_PRICE",
+    ],
+    "GREEN": [
+        "ENV_CLIMATECHANGE", "ENV_GREEN", "ENV_SOLAR", "ENV_WIND",
+        "ENV_NUCLEARPOWER", "RENEWABLE",
+    ],
+    "CHIPS": [
+        "WB_130_SCIENCE_AND_TECHNOLOGY", "WB_133_INFORMATION_AND_COMMUNICATION_TECHNOLOGIES",
+    ],
+    "SOFTWARE": [
+        "WB_133_INFORMATION_AND_COMMUNICATION_TECHNOLOGIES", "WB_678_DIGITAL_GOVERNMENT",
+        "CYBER_ATTACK",
+    ],
+    "QUANTUM": [
+        "WB_130_SCIENCE_AND_TECHNOLOGY",
+    ],
+    "WEAPONS": [
+        "ARMEDCONFLICT", "MILITARY", "SECURITY_SERVICES", "KILL",
+        "WB_2432_FRAGILITY_CONFLICT_AND_VIOLENCE", "WB_2433_CONFLICT_AND_VIOLENCE",
+        "EPU_CATS_NATIONAL_SECURITY",
+    ],
+    "EDUCATION": [
+        "EDUCATION", "WB_470_EDUCATION", "SOC_POINTSOFINTEREST_SCHOOL",
+    ],
+    "BIOTECH": [
+        "GENERAL_HEALTH", "MEDICAL", "WB_621_HEALTH_NUTRITION_AND_POPULATION",
+        "CRISISLEX_C03_WELLBEING_HEALTH",
+    ],
+    "FINANCE": [
+        "EPU_ECONOMY", "EPU_ECONOMY_HISTORIC", "ECON_BANKRUPTCY",
+        "WB_2670_JOBS", "TAX_ECON_PRICE",
+    ],
+    "INFRA": [
+        "WB_135_TRANSPORT", "WB_137_WATER", "INFRASTRUCTURE",
+    ],
+    "AGRI": [
+        "FAMINE", "FOOD_SECURITY", "WB_477_AGRICULTURE",
+    ],
+    "SPACE": [
+        "WB_130_SCIENCE_AND_TECHNOLOGY",
+    ],
+}
+
+
+def fetch_gkg_sentiment(
+    start_date: str = "2020-01-01",
+    end_date: str | None = None,
+    project_id: str | None = None,
+) -> pd.DataFrame:
+    """Fetch daily news sentiment per sector from GDELT GKG via BigQuery.
+
+    Aggregates V2Tone (article-level sentiment) grouped by sector-relevant themes.
+    Returns daily features: {sector}_news_tone, {sector}_news_volume, {sector}_news_polarity.
+
+    Note: GKG scans ~130 GB/year. Default start is 2020 to stay within free tier.
+    """
+    from google.cloud import bigquery
+
+    # GKG is expensive — limit to a reasonable range
+    start_date = _to_str(start_date)
+    end_date = _to_str(end_date) if end_date else datetime.now().strftime("%Y-%m-%d")
+    # Clamp start to no earlier than 2020 to avoid blowing BQ quota
+    if start_date < "2020-01-01":
+        start_date = "2020-01-01"
+
+    # Build CASE WHEN for sector classification based on themes
+    sector_cases = []
+    for sector, themes in GKG_SECTOR_THEMES.items():
+        theme_conditions = " OR ".join(
+            f"theme_name LIKE '%{t}%'" for t in themes
+        )
+        sector_cases.append(f"WHEN {theme_conditions} THEN '{sector}'")
+
+    sector_case_sql = "CASE " + " ".join(sector_cases) + " ELSE NULL END"
+
+    query = f"""
+    WITH articles AS (
+        SELECT
+            PARSE_DATE('%Y%m%d', SUBSTR(CAST(DATE AS STRING), 1, 8)) AS date,
+            CAST(SPLIT(V2Tone, ',')[OFFSET(0)] AS FLOAT64) AS tone,
+            CAST(SPLIT(V2Tone, ',')[OFFSET(3)] AS FLOAT64) AS polarity,
+            V2Themes
+        FROM `gdelt-bq.gdeltv2.gkg_partitioned`
+        WHERE _PARTITIONTIME BETWEEN '{start_date}' AND '{end_date}'
+          AND V2Tone IS NOT NULL
+          AND V2Themes IS NOT NULL
+    ),
+    article_themes AS (
+        SELECT
+            a.date,
+            a.tone,
+            a.polarity,
+            {sector_case_sql} AS sector
+        FROM articles a,
+        UNNEST(SPLIT(a.V2Themes, ';')) AS raw_theme
+        CROSS JOIN UNNEST([SPLIT(raw_theme, ',')[OFFSET(0)]]) AS theme_name
+    )
+    SELECT
+        date,
+        sector,
+        AVG(tone) AS avg_tone,
+        COUNT(*) AS volume,
+        AVG(polarity) AS avg_polarity
+    FROM article_themes
+    WHERE sector IS NOT NULL
+    GROUP BY date, sector
+    ORDER BY date, sector
+    """
+
+    print(f"[GKG-BQ] Querying news sentiment {start_date} to {end_date}...")
+    client = bigquery.Client(project=project_id)
+    df = client.query(query).to_dataframe()
+
+    if df.empty:
+        print("[GKG-BQ] No data returned")
+        return pd.DataFrame()
+
+    # Pivot: one row per day, columns = {sector}_{metric}
+    df["date"] = pd.to_datetime(df["date"])
+    pivoted = df.pivot_table(
+        index="date",
+        columns="sector",
+        values=["avg_tone", "volume", "avg_polarity"],
+        aggfunc="first",
+    )
+    # Flatten multi-level columns
+    pivoted.columns = [f"{sector}_news_{metric}" for metric, sector in pivoted.columns]
+    pivoted = pivoted.sort_index()
+
+    # Fill missing days with 0
+    for col in pivoted.columns:
+        pivoted[col] = pd.to_numeric(pivoted[col], errors="coerce").fillna(0).astype(float)
+
+    print(f"[GKG-BQ] Loaded {len(pivoted)} days, {len(pivoted.columns)} news features")
+    return pivoted
+
+
 def fetch_gdelt_csv(
     start_date: str = "2020-01-01",
     end_date: str | None = None,

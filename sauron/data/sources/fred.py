@@ -57,7 +57,20 @@ def fetch_series(
 def fetch_default(start: str = "2010-01-01") -> pd.DataFrame:
     """Fetch the default FRED series defined in config."""
     default_series = [
+        # Original macro series
         "GDP", "CPIAUCSL", "FEDFUNDS", "UNRATE", "DGS10",
         "DTWEXBGS", "M2SL", "INDPRO", "HOUST", "DCOILWTICO",
+        # Volatility & risk
+        "VIXCLS",           # VIX (CBOE volatility index)
+        # Yield curve & credit
+        "DGS2",             # 2Y treasury (for yield curve spread)
+        "DGS30",            # 30Y treasury
+        "BAMLH0A0HYM2",    # ICE BofA high yield spread (credit risk)
+        # Leading indicators
+        "ICSA",             # Initial jobless claims (weekly)
+        "UMCSENT",          # U. Michigan consumer sentiment
+        "PERMIT",           # Building permits
+        # Trade & shipping
+        "BOPGSTB",          # Trade balance
     ]
     return fetch_series(default_series, start=start)

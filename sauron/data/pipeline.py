@@ -215,6 +215,44 @@ def build_dataset(
     return samples
 
 
+# Market tickers used as input features (not labels)
+MARKET_TICKERS = {
+    "SPY": "sp500",          # S&P 500 — broad market
+    "QQQ": "nasdaq100",      # Nasdaq 100 — tech sentiment
+    "IWM": "russell2000",    # Russell 2000 — small caps / risk appetite
+    "GLD": "gold",           # Gold — safe haven
+    "TLT": "treasury_20y",   # 20Y+ treasury bonds — rate expectations
+    "HYG": "high_yield",     # High yield corporate bonds — credit risk
+    "UUP": "usd_index",      # US Dollar index
+    "EEM": "emerging_mkts",  # Emerging markets — global risk
+    "COPX": "copper",        # Copper — industrial demand proxy
+    "BTC-USD": "bitcoin",    # Bitcoin — speculative risk appetite
+}
+
+
+def _fetch_market_features(start: str = "2010-01-01") -> pd.DataFrame:
+    """Fetch daily market prices and compute features for model input."""
+    import yfinance as yf
+
+    tickers = list(MARKET_TICKERS.keys())
+    data = yf.download(tickers, start=start, auto_adjust=True, progress=False)
+
+    if isinstance(data.columns, pd.MultiIndex):
+        prices = data["Close"]
+    else:
+        prices = data[["Close"]].rename(columns={"Close": tickers[0]})
+
+    # Rename to friendly names
+    prices = prices.rename(columns=MARKET_TICKERS)
+    prices.index = pd.to_datetime(prices.index)
+    prices.index.name = "date"
+
+    # Resample to daily and forward-fill weekends/holidays
+    prices = prices.resample("D").ffill()
+
+    return prices
+
+
 class SauronDataset:
     """Full pipeline: fetch all sources, merge, normalize, and build samples."""
 
@@ -249,6 +287,15 @@ class SauronDataset:
             except Exception as e:
                 print(f"[Pipeline] EIA skipped: {e}")
 
+            # Market features from yfinance (prices as input features)
+            try:
+                market_df = _fetch_market_features(start=start)
+                if not market_df.empty:
+                    frames.append(market_df)
+                    print(f"[Pipeline] Market features loaded ({len(market_df.columns)} tickers)")
+            except Exception as e:
+                print(f"[Pipeline] Market features skipped: {e}")
+
         # GDELT event features — prefer BigQuery (full history), fall back to HF/CSV
         gdelt_loaded = False
         if not hf_only:
@@ -261,6 +308,17 @@ class SauronDataset:
                     gdelt_loaded = True
             except Exception as e:
                 print(f"[Pipeline] GDELT BigQuery failed: {e}")
+
+        # GKG news sentiment (also BigQuery)
+        if not hf_only:
+            try:
+                from sauron.data.sources.gdelt import fetch_gkg_sentiment
+                gkg_df = fetch_gkg_sentiment(start_date=start)
+                if not gkg_df.empty:
+                    frames.append(gkg_df)
+                    print(f"[Pipeline] GKG news sentiment loaded")
+            except Exception as e:
+                print(f"[Pipeline] GKG news sentiment skipped: {e}")
 
         if not gdelt_loaded:
             try:
