@@ -20,6 +20,7 @@ class TrainingConfig:
     num_graph_layers: int = 2
     num_graph_heads: int = 4
     dropout: float = 0.1
+    encoder_type: str = "transformer"
 
     # Training
     batch_size: int = 64

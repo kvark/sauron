@@ -55,8 +55,7 @@ WDI_INDICATORS = {
 }
 
 DEFAULT_COUNTRIES = [
-    "USA", "CHN", "JPN", "DEU", "GBR", "FRA", "IND", "ITA", "BRA", "CAN",
-    "RUS", "KOR", "AUS", "MEX", "IDN", "SAU", "TUR", "NLD", "CHE", "TWN",
+    "USA", "CHN", "DEU", "JPN", "GBR",
 ]
 
 

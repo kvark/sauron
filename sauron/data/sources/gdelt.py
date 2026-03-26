@@ -63,45 +63,87 @@ def fetch_gdelt_bigquery(
     min_goldstein_abs: float = 3.0,
     project_id: str | None = None,
 ) -> pd.DataFrame:
-    """Fetch GDELT events from BigQuery.
+    """Fetch GDELT events pre-aggregated to daily sector features via BigQuery.
+
+    Aggregation happens server-side to avoid downloading hundreds of millions of
+    raw events. Returns a DataFrame with the same schema as
+    aggregate_daily_sector_features() — one row per day, with per-sector columns.
 
     Requires google-cloud-bigquery and a GCP project (free tier is sufficient).
-    Returns raw events filtered by impact threshold.
     """
-    try:
-        from google.cloud import bigquery
-    except ImportError:
-        raise ImportError("pip install google-cloud-bigquery")
+    from google.cloud import bigquery
 
     start_date = _to_str(start_date)
     end_date = _to_str(end_date) if end_date else datetime.now().strftime("%Y-%m-%d")
     start_int = start_date.replace("-", "")
     end_int = end_date.replace("-", "")
 
+    # Build sector CASE expressions from CAMEO_SECTOR_MAP
+    # Invert: for each sector, collect the CAMEO prefixes
+    from sauron.sectors import SECTORS
+    sector_cameos: dict[str, list[str]] = {s: [] for s in SECTORS}
+    for cameo, sectors in CAMEO_SECTOR_MAP.items():
+        for s in sectors:
+            if s in sector_cameos:
+                sector_cameos[s].append(cameo)
+
+    # Build regime CASE
+    regime_codes_str = ", ".join(f"'{c}'" for c in REGIME_SHIFT_CODES)
+
+    # For each sector, build SQL aggregation columns
+    sector_sql_parts = []
+    for sector, cameos in sector_cameos.items():
+        if not cameos:
+            continue
+        # Build OR conditions matching CAMEO prefixes against EventRootCode and EventCode
+        conditions = []
+        for cameo in cameos:
+            if len(cameo) <= 2:
+                conditions.append(f"EventRootCode = '{cameo}'")
+            else:
+                conditions.append(f"STARTS_WITH(EventCode, '{cameo}')")
+        where = " OR ".join(conditions)
+
+        sector_sql_parts.append(f"""
+    COUNTIF({where}) AS {sector}_event_count,
+    AVG(IF({where}, GoldsteinScale, NULL)) AS {sector}_goldstein_mean,
+    AVG(IF({where}, AvgTone, NULL)) AS {sector}_tone_mean,
+    SUM(IF({where}, NumMentions, 0)) AS {sector}_mentions_sum,
+    MAX(IF(({where}) AND EventCode IN ({regime_codes_str}), 1, 0)) AS {sector}_regime_flag""")
+
+    sector_columns = ",".join(sector_sql_parts)
+
     query = f"""
     SELECT
-        SQLDATE,
-        EventCode,
-        EventRootCode,
-        GoldsteinScale,
-        NumMentions,
-        NumSources,
-        AvgTone,
-        Actor1CountryCode,
-        Actor2CountryCode,
-        ActionGeo_CountryCode,
-        ActionGeo_Lat,
-        ActionGeo_Long
+        PARSE_DATE('%Y%m%d', CAST(SQLDATE AS STRING)) AS date,
+        COUNT(*) AS total_events,
+        {sector_columns}
     FROM `gdelt-bq.gdeltv2.events`
     WHERE SQLDATE BETWEEN {start_int} AND {end_int}
       AND ABS(GoldsteinScale) >= {min_goldstein_abs}
       AND NumMentions >= 5
+    GROUP BY SQLDATE
+    ORDER BY SQLDATE
     """
 
+    print(f"[GDELT-BQ] Querying {start_date} to {end_date}...")
     client = bigquery.Client(project=project_id)
     df = client.query(query).to_dataframe()
 
-    df["date"] = pd.to_datetime(df["SQLDATE"], format="%Y%m%d")
+    if df.empty:
+        return pd.DataFrame()
+
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.set_index("date").sort_index()
+
+    # Convert nullable integer types to float and fill NaN with 0
+    for col in df.columns:
+        df[col] = pd.to_numeric(df[col], errors="coerce").astype(float).fillna(0)
+
+    # Drop the total_events helper column
+    df = df.drop(columns=["total_events"], errors="ignore")
+
+    print(f"[GDELT-BQ] Loaded {len(df)} days of sector features")
     return df
 
 

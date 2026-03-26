@@ -8,6 +8,61 @@ from sauron.model.sector_graph import SectorInteractionGraph
 from sauron.sectors import SECTORS
 
 
+class TransformerTemporalEncoder(nn.Module):
+    """Encode (batch, lookback, num_features) into (batch, hidden_dim) via Transformer.
+
+    Uses learned positional encoding and mean-pooling over the time dimension.
+    Designed to be small and heavily regularized for limited data (~4K samples).
+    """
+
+    def __init__(
+        self,
+        num_features: int,
+        hidden_dim: int = 128,
+        num_layers: int = 2,
+        num_heads: int = 4,
+        dropout: float = 0.2,
+        max_len: int = 512,
+    ):
+        super().__init__()
+        self.proj = nn.Linear(num_features, hidden_dim)
+        self.proj_dropout = nn.Dropout(dropout)
+        self.pos_encoding = nn.Parameter(torch.randn(1, max_len, hidden_dim) * 0.02)
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+
+        encoder_layer = nn.TransformerEncoderLayer(
+            d_model=hidden_dim,
+            nhead=num_heads,
+            dim_feedforward=hidden_dim * 2,
+            dropout=dropout,
+            batch_first=True,
+            activation="gelu",
+        )
+        self.transformer = nn.TransformerEncoder(
+            encoder_layer,
+            num_layers=num_layers,
+        )
+        self.output_dropout = nn.Dropout(dropout)
+
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        Args:
+            x: (batch, lookback, num_features)
+            mask: (batch, lookback, num_features) optional
+
+        Returns:
+            (batch, hidden_dim)
+        """
+        if mask is not None:
+            x = x * mask
+        seq_len = x.shape[1]
+        h = self.proj_dropout(self.proj(x))  # (batch, lookback, hidden_dim)
+        h = self.layer_norm(h + self.pos_encoding[:, :seq_len, :])
+        h = self.transformer(h)  # (batch, lookback, hidden_dim)
+        h = h.mean(dim=1)  # mean-pool over time → (batch, hidden_dim)
+        return self.output_dropout(h)
+
+
 class TemporalEncoder(nn.Module):
     """Encode (batch, lookback, num_features) into (batch, hidden_dim).
 
@@ -59,11 +114,20 @@ class SauronModel(nn.Module):
         num_graph_layers: int = 2,
         num_graph_heads: int = 4,
         dropout: float = 0.1,
+        encoder_type: str = "transformer",
     ):
         super().__init__()
         self.num_sectors = len(SECTORS)
 
-        self.encoder = TemporalEncoder(num_features, hidden_dim)
+        if encoder_type == "transformer":
+            self.encoder = TransformerTemporalEncoder(
+                num_features, hidden_dim, dropout=dropout,
+            )
+        elif encoder_type == "gru":
+            self.encoder = TemporalEncoder(num_features, hidden_dim)
+        else:
+            raise ValueError(f"Unknown encoder_type: {encoder_type!r}. Use 'transformer' or 'gru'.")
+        self.encoder_dropout = nn.Dropout(dropout)
 
         # Learned sector query vectors — each sector attends to the shared encoding differently
         self.sector_queries = nn.Parameter(torch.randn(self.num_sectors, hidden_dim) * 0.02)
@@ -72,6 +136,7 @@ class SauronModel(nn.Module):
         self.sector_gate = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.GELU(),
+            nn.Dropout(dropout),
             nn.LayerNorm(hidden_dim),
         )
 
@@ -98,7 +163,7 @@ class SauronModel(nn.Module):
         batch = features.shape[0]
 
         # Encode temporal features
-        encoding = self.encoder(features, mask)  # (batch, H)
+        encoding = self.encoder_dropout(self.encoder(features, mask))  # (batch, H)
 
         # Expand to per-sector representations via learned queries
         encoding_expanded = encoding.unsqueeze(1).expand(-1, self.num_sectors, -1)

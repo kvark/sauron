@@ -41,6 +41,63 @@ def align_to_daily(
     return merged
 
 
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add derived features (momentum, volatility, GDELT smoothing) to the raw feature DataFrame.
+
+    Operates on pre-normalization data. Only computes rolling features for columns
+    with >50% non-null values. Keeps all original columns alongside derived ones.
+
+    Derived columns:
+    - {col}_mom7:  7-day percentage change (momentum)
+    - {col}_mom30: 30-day percentage change (momentum)
+    - {col}_vol14: 14-day rolling standard deviation (volatility)
+    - {col}_smooth7: 7-day rolling mean (GDELT columns only)
+    """
+    original_cols = list(df.columns)
+    n_rows = len(df)
+    result = df.copy()
+
+    # Identify numeric columns with enough data (>80% non-null)
+    numeric_cols = df.select_dtypes(include=[np.number]).columns
+    eligible_cols = [c for c in numeric_cols if df[c].notna().sum() > 0.8 * n_rows]
+
+    # GDELT sector feature suffixes — these are the noisiest, benefit most from smoothing
+    gdelt_suffixes = ("_event_count", "_goldstein_mean", "_tone_mean", "_mentions_sum")
+    gdelt_cols = [c for c in eligible_cols if c.endswith(gdelt_suffixes)]
+
+    # Non-GDELT columns: FRED, EIA macro series (high-quality, daily)
+    macro_cols = [c for c in eligible_cols if c not in gdelt_cols and not c.endswith("_regime_flag")]
+
+    added = 0
+
+    # Momentum: 7-day for macro columns only (not GDELT — too noisy)
+    if macro_cols:
+        pct = df[macro_cols].pct_change(periods=7, fill_method=None)
+        # Replace inf values from division by zero
+        pct = pct.replace([np.inf, -np.inf], np.nan)
+        pct.columns = [f"{c}_mom7" for c in macro_cols]
+        result = pd.concat([result, pct], axis=1)
+        added += len(macro_cols)
+
+    # Volatility: 14-day rolling std for macro columns
+    if macro_cols:
+        vol = df[macro_cols].rolling(window=14, min_periods=7).std()
+        vol.columns = [f"{c}_vol14" for c in macro_cols]
+        result = pd.concat([result, vol], axis=1)
+        added += len(macro_cols)
+
+    # GDELT smoothing: 7-day rolling mean to reduce daily noise
+    if gdelt_cols:
+        smooth = df[gdelt_cols].rolling(window=7, min_periods=3).mean()
+        smooth.columns = [f"{c}_smooth7" for c in gdelt_cols]
+        result = pd.concat([result, smooth], axis=1)
+        added += len(gdelt_cols)
+
+    print(f"[Pipeline] Feature engineering: {len(original_cols)} original + {added} derived "
+          f"= {len(result.columns)} total features")
+    return result
+
+
 def normalize_features(df: pd.DataFrame, method: str = "zscore") -> tuple[pd.DataFrame, dict]:
     """Normalize features, returning the normalized df and stats for inverse transform.
 
@@ -88,46 +145,70 @@ def build_dataset(
     features: pd.DataFrame,
     labels: pd.DataFrame,
     lookback_days: int = 90,
-    horizon_days: int = 90,
+    horizon_days: int | list[int] = 90,
 ) -> list[dict]:
     """Build windowed samples for training.
 
     Each sample is a dict with:
     - 'features': (lookback_days, num_features) array
     - 'mask': (lookback_days, num_features) binary mask
-    - 'labels': dict of sector -> tendency score at target horizon
+    - 'labels': dict of sector -> tendency score (primary horizon)
+    - 'multi_labels': dict of horizon -> dict of sector -> tendency (all horizons)
     - 'date': the prediction date
+
+    If horizon_days is a list, trains on all horizons (multi-horizon mode).
+    The primary 'labels' uses the first horizon.
     """
+    horizons = [horizon_days] if isinstance(horizon_days, int) else horizon_days
+    primary_horizon = horizons[0]
+
     # Align features and labels to same dates
     common_dates = features.index.intersection(labels.index)
     features = features.loc[common_dates]
     labels = labels.loc[common_dates]
 
-    # Filter label columns to requested horizon
-    horizon_cols = [c for c in labels.columns if c.endswith(f"_{horizon_days}d")]
+    # Collect columns per horizon
+    horizon_col_map = {}
+    for h in horizons:
+        horizon_col_map[h] = [c for c in labels.columns if c.endswith(f"_{h}d")]
+
+    primary_cols = horizon_col_map[primary_horizon]
 
     samples = []
     for i in range(lookback_days, len(features)):
         date = features.index[i]
 
-        # Check that we have a label for this date
         if date not in labels.index:
             continue
 
-        label_row = labels.loc[date, horizon_cols]
+        label_row = labels.loc[date, primary_cols]
         if label_row.isna().all():
             continue
 
         feat_window = features.iloc[i - lookback_days : i]
 
+        # Primary labels (for backward compat)
+        primary_labels = {
+            col.replace(f"_{primary_horizon}d", ""): float(label_row[col])
+            for col in primary_cols
+            if not pd.isna(label_row[col])
+        }
+
+        # Multi-horizon labels
+        multi = {}
+        for h in horizons:
+            h_row = labels.loc[date, horizon_col_map[h]]
+            multi[h] = {
+                col.replace(f"_{h}d", ""): float(h_row[col])
+                for col in horizon_col_map[h]
+                if not pd.isna(h_row[col])
+            }
+
         samples.append({
-            "features": feat_window.values.astype(np.float32),
+            "features": np.array(feat_window.values, dtype=np.float32),
             "mask": create_mask(feat_window).values,
-            "labels": {
-                col.replace(f"_{horizon_days}d", ""): float(label_row[col])
-                for col in horizon_cols
-                if not pd.isna(label_row[col])
-            },
+            "labels": primary_labels,
+            "multi_labels": multi,
             "date": date,
         })
 
@@ -168,32 +249,30 @@ class SauronDataset:
             except Exception as e:
                 print(f"[Pipeline] EIA skipped: {e}")
 
-        # GDELT event features — prefer HuggingFace (fast), fall back to CSV
+        # GDELT event features — prefer BigQuery (full history), fall back to HF/CSV
         gdelt_loaded = False
-        try:
-            from sauron.data.sources.gdelt import aggregate_daily_sector_features
-            from sauron.data.sources.huggingface import fetch_gdelt_hf
-            raw_gdelt = fetch_gdelt_hf()
-            if not raw_gdelt.empty:
-                frames.append(aggregate_daily_sector_features(raw_gdelt))
-                print("[Pipeline] GDELT data loaded (HuggingFace)")
-                gdelt_loaded = True
-        except Exception as e:
-            print(f"[Pipeline] GDELT HuggingFace failed: {e}")
-
-        if not gdelt_loaded and not hf_only:
+        if not hf_only:
             try:
-                from sauron.data.sources.gdelt import (
-                    aggregate_daily_sector_features,
-                    fetch_gdelt_csv,
-                )
-                # Limit CSV download to 90 days to avoid massive downloads
-                raw_gdelt = fetch_gdelt_csv(start_date=start, max_days=90)
+                from sauron.data.sources.gdelt import fetch_gdelt_bigquery
+                gdelt_features = fetch_gdelt_bigquery(start_date=start)
+                if not gdelt_features.empty:
+                    frames.append(gdelt_features)
+                    print(f"[Pipeline] GDELT data loaded (BigQuery)")
+                    gdelt_loaded = True
+            except Exception as e:
+                print(f"[Pipeline] GDELT BigQuery failed: {e}")
+
+        if not gdelt_loaded:
+            try:
+                from sauron.data.sources.gdelt import aggregate_daily_sector_features
+                from sauron.data.sources.huggingface import fetch_gdelt_hf
+                raw_gdelt = fetch_gdelt_hf()
                 if not raw_gdelt.empty:
                     frames.append(aggregate_daily_sector_features(raw_gdelt))
-                    print("[Pipeline] GDELT data loaded (CSV, last 90 days)")
-            except Exception as e2:
-                print(f"[Pipeline] GDELT CSV skipped: {e2}")
+                    print("[Pipeline] GDELT data loaded (HuggingFace)")
+                    gdelt_loaded = True
+            except Exception as e:
+                print(f"[Pipeline] GDELT HuggingFace failed: {e}")
 
         # World Bank development indicators — prefer HuggingFace, fall back to wbgapi
         wb_loaded = False
@@ -240,7 +319,10 @@ class SauronDataset:
         return compute_tendency_labels(baskets, horizons_days=horizons, start=start)
 
     def build(
-        self, start: str = "2015-01-01", horizon_days: int = 90, hf_only: bool = False,
+        self,
+        start: str = "2015-01-01",
+        horizon_days: int | list[int] = 90,
+        hf_only: bool = False,
     ) -> list[dict]:
         """Full pipeline: fetch everything and build training samples."""
         print("[Pipeline] Fetching features...")
@@ -248,6 +330,9 @@ class SauronDataset:
 
         print("[Pipeline] Fetching labels...")
         labels = self.fetch_labels(start=start)
+
+        print("[Pipeline] Engineering derived features...")
+        features = engineer_features(features)
 
         print("[Pipeline] Normalizing features...")
         features_norm, self.feature_stats = normalize_features(features)
